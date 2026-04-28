@@ -1,0 +1,13 @@
+.venv
+sentinel_agent/.venv
+sentinel_agent/venv
+node_modules
+.env
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS files
+.DS_Storesentinel_agent/.venv/
+__pycache__/
+.DS_Store

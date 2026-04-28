@@ -1,0 +1,27 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const app = express();
+
+const LOG_FILE = path.join(__dirname, '../../logs/error.log');
+
+// Fix the bug by adding checks to ensure 'user' is not null or undefined before accessing 'name'
+app.get('/crash', (req, res) => {
+    try {
+        const user = {
+            name: 'John Doe',
+            id: 12345
+        };
+        if (user) {
+            res.send(user.name); // Now this will succeed
+        } else {
+            res.status(400).send("Invalid user data");
+        }
+    } catch (error) {
+        const errorData = `\n---\nFILE: ${__filename}\nERROR: ${error.message}\nSTACK: ${error.stack}\n---\n`;
+        fs.appendFileSync(LOG_FILE, errorData);
+        res.status(500).send("Sentinel is on the case. Check your terminal!");
+    }
+});
+
+app.listen(3000, () => console.log("🚀 Patient App on port 3000"));
