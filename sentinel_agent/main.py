@@ -3,55 +3,88 @@ import re
 import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from graph import repair_code
+from graph import repair_code, optimize_code 
 
-# --- CONFIGURATION (Paths ko apne hisab se ek baar check kar lo) ---
-# Agar tum sentinel_agent folder mein ho, toh app-to-fix bahar hoga.
+# Paths ko normalize kar lete hain taaki OS ka koi chakkar na rahe
 LOG_DIR = os.path.abspath("../app-to-fix/src/logs") 
-LOG_FILE = os.path.join(LOG_DIR, "error.log")
+ERROR_LOG = os.path.normpath(os.path.join(LOG_DIR, "error.log"))
+PERF_LOG = os.path.normpath(os.path.join(LOG_DIR, "performance.log"))
 
 class SentinelHandler(FileSystemEventHandler):
     def on_modified(self, event):
-        # Full path check karte hain taaki galti na ho
-        if os.path.abspath(event.src_path) == os.path.abspath(LOG_FILE):
-            print("🔍 Log file modification detected...")
+        # Agar directory modify hui hai toh skip karo
+        if event.is_directory:
+            return
+
+        # Current modified file ka absolute path
+        src_path = os.path.abspath(event.src_path)
+        
+        # 1. Check for Crashes
+        if src_path == os.path.abspath(ERROR_LOG):
+            print("\n🔍 [EVENT] Crash Log Change Detected...")
             self.process_latest_error()
+            
+        # 2. Check for Slowness
+        elif src_path == os.path.abspath(PERF_LOG): 
+            print("\n⚡ [EVENT] Performance Log Change Detected...")
+            self.process_performance_issue()
 
     def process_latest_error(self):
         try:
-            with open(LOG_FILE, "r") as f:
-                content = f.read()
-                if not content: return
+            # File read karne se pehle thoda wait (taaki OS file lock release kar de)
+            time.sleep(0.5) 
+            with open(ERROR_LOG, "r") as f:
+                content = f.read().strip().split("---")
+                if len(content) < 2: return
+                last_error = content[-2].strip()
                 
-                # Get the last error block
-                errors = content.strip().split("---")
-                if len(errors) < 2: return # Not enough content
-                
-                last_error = errors[-2].strip()
-                
-                # Extract file path using Regex
                 file_match = re.search(r"FILE: (.+)", last_error)
                 if file_match:
                     file_path = file_match.group(1).strip()
-                    print(f"🚨 Crash detected in: {file_path}")
-                    # AI Repair logic call
+                    print(f"🚨 Repairing Crash in: {file_path}")
                     repair_code(last_error, file_path)
         except Exception as e:
-            print(f"⚠️ Error reading log file: {e}")
+            print(f"⚠️ Error processing crash: {e}")
+
+    def process_performance_issue(self):
+        try:
+            time.sleep(0.5)
+            with open(PERF_LOG, "r") as f:
+                lines = [line.strip() for line in f.readlines() if line.strip()]
+                if not lines: return
+                
+                last_perf_issue = lines[-1]
+                # Target file ka path sahi hona chahiye
+                target_file = os.path.abspath("../app-to-fix/src/server.js") 
+                
+                print(f"🚀 Sentinel is analyzing performance: {last_perf_issue}")
+                optimize_code(last_perf_issue, target_file)
+        except Exception as e:
+            print(f"⚠️ Error processing performance: {e}")
 
 if __name__ == "__main__":
     if not os.path.exists(LOG_DIR):
-        print(f"❌ Error: Directory {LOG_DIR} nahi mil rahi! Path check karo.")
-    else:
-        observer = Observer()
-        # Hum poore folder ko monitor kar rahe hain
-        observer.schedule(SentinelHandler(), path=LOG_DIR, recursive=False)
-        observer.start()
-        print(f"🕵️ Sentinel Watchdog is active.")
-        print(f"👀 Monitoring: {LOG_FILE}")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            observer.stop()
-        observer.join()
+        os.makedirs(LOG_DIR)
+        
+    for f in [ERROR_LOG, PERF_LOG]:
+        if not os.path.exists(f):
+            with open(f, 'w') as dummy: pass
+
+    observer = Observer()
+    # Path normalize karke monitor karo
+    observer.schedule(SentinelHandler(), path=LOG_DIR, recursive=False)
+    observer.start()
+    
+    print("\n" + "="*40)
+    print("🕵️  SENTINEL WATCHDOG ACTIVE (Dual-Mode)")
+    print(f"📁 Logs Folder: {LOG_DIR}")
+    print(f"🚨 Error File: {os.path.basename(ERROR_LOG)}")
+    print(f"⚡ Perf File:  {os.path.basename(PERF_LOG)}")
+    print("="*40 + "\n")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()

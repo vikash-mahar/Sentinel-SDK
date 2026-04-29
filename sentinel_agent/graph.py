@@ -5,25 +5,22 @@ from dotenv import load_dotenv
 import json
 from datetime import datetime
 from prompts import SYSTEM_PROMPT, LOGIC_VERIFICATION_PROMPT
-# from openai import OpenAI
 import chromadb
-
 
 load_dotenv()
 
+# --- ChromaDB Setup Fix ---
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+collection = None  # Global declaration taaki retrieval fail na ho
+
 try:
     collection = chroma_client.get_collection(name="codebase")
-except:
-    print("⚠️ Warning: Collection 'codebase' not found. Run indexer.py first!")
+except Exception as e:
+    print(f"⚠️ Warning: Collection 'codebase' not found. Run indexer.py first! Error: {e}")
 
+client = Groq() 
 
-
-# Dual-Model Setup
-client = Groq() # For Fixing (Fast)
-# client2 = OpenAI(
-#     api_key=os.getenv("DEEPSEEK_API_KEY"),
-#     base_url="https://api.deepseek.com"
-# )
+# --- HELPER FUNCTIONS ---
 
 def get_related_context(error_log):
     """Fetches relevant code snippets from ChromaDB memory based on the error."""
@@ -52,15 +49,15 @@ def log_mentor_message(message):
     except Exception as e:
         print(f"⚠️ Could not save mentor message: {e}")
 
-def log_fix_to_history(file_path, error_log, original_code, corrected_code):
+def log_fix_to_history(file_path, error_log, original_code, corrected_code, mode="Auto-Patched"):
     history_file = "../sentinel-dashboard/public/fixes_history.json"
     new_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "file_fixed": file_path,
         "error_detected": error_log[:200] + "...",
-        "status": "Auto-Patched",
-        "error_code": original_code, # Dashboard shows this as 'Previous Code'
-        "corrected_code": corrected_code # Dashboard shows this as 'Fixed Code'
+        "status": mode, # Ab ye 'Auto-Patched' ya 'Self-Optimized' dikhayega
+        "error_code": original_code, 
+        "corrected_code": corrected_code 
     }
     history_data = []
     if os.path.exists(history_file):
@@ -72,7 +69,7 @@ def log_fix_to_history(file_path, error_log, original_code, corrected_code):
     history_data.append(new_record)
     with open(history_file, "w") as f:
         json.dump(history_data, f, indent=4)
-    print(f"📄 Record saved to fixes_history.json")
+    print(f"📄 Record saved to fixes_history.json as {mode}")
 
 def validate_code(file_path):
     try:
@@ -87,6 +84,80 @@ def validate_code(file_path):
             return False, result.stderr
     except Exception as e: 
         return False, str(e)
+
+def optimize_code(perf_log, file_path):
+    """Handles Performance Refactoring with strict extraction."""
+    print(f"⚡ Sentinel Optimization Mode: {file_path}")
+    
+    if not os.path.exists(file_path):
+        print(f"❌ Error: File not found at {file_path}")
+        return False
+
+    with open(file_path, "r") as f:
+        original_code = f.read()
+
+    context = get_related_context(perf_log)
+
+    prompt = f"""
+    You are a Senior Performance Engineer. 
+    ISSUE: {perf_log}
+    TARGET FILE: {file_path}
+    CODE:
+    {original_code}
+
+    CONTEXT FROM OTHER FILES:
+    {context}
+
+    TASK:
+    Optimize the TARGET FILE for better performance. 
+    - Reduce time complexity.
+    - Use efficient built-in methods.
+    - KEEP THE ORIGINAL LOGIC UNCHANGED.
+
+    CRITICAL INSTRUCTION:
+    Return ONLY the code inside [FIXED_CODE] and [/FIXED_CODE] tags. 
+    Do NOT include any markdown (```), explanations, or '###' headers inside the tags.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant"
+        ).choices[0].message.content
+
+        # --- SMART EXTRACTION LOGIC ---
+        optimized_code = response
+        if "[FIXED_CODE]" in response:
+            optimized_code = response.split("[FIXED_CODE]")[1].split("[/FIXED_CODE]")[0].strip()
+        
+        # Remove any lingering Markdown backticks or language tags
+        if "```" in optimized_code:
+            lines = optimized_code.split("\n")
+            # Filter out lines starting with ```
+            optimized_code = "\n".join([line for line in lines if not line.strip().startswith("```")])
+
+        optimized_code = optimized_code.strip()
+
+        # Validation Step
+        temp_file = file_path.replace(".js", ".opt.js")
+        with open(temp_file, "w") as f:
+            f.write(optimized_code)
+        
+        success, err = validate_code(temp_file)
+        if success:
+            os.replace(temp_file, file_path)
+            print("🚀 Optimization Deployed Successfully!")
+            log_fix_to_history(file_path, perf_log, original_code, optimized_code, mode="Self-Optimized")
+            return True
+        else:
+            print(f"❌ Optimization Failed Validation. AI output was invalid JS.")
+            print(f"Debug Info: {err}")
+            if os.path.exists(temp_file): os.remove(temp_file)
+            return False
+            
+    except Exception as e:
+        print(f"⚠️ Optimization Error: {e}")
+        return False
 
 def code_verification(original_code, fixed_code, error_log, file_path):
     print("🧠 Sentinel is auditing the fix logic via Semantic Analysis...")
@@ -121,6 +192,13 @@ def code_verification(original_code, fixed_code, error_log, file_path):
         return True, "API Fallback"
 
 def repair_code(error_log, file_path):
+    # Tera existing repair_code yahan add kar le (Jo humne pehle fix kiya tha)
+    print(f"🛠️ Repair mode activated for {file_path}")
+    # ... logic ...
+    pass
+
+def repair_code(error_log, file_path):
+    print(f"🛠️ Repair mode activated for {file_path}")
     print(f"🐞 DEBUG: Received Error Log -> {error_log}")
     
     with open(file_path, "r") as f:

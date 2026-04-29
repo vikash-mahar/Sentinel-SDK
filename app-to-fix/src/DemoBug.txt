@@ -23,13 +23,12 @@ if (!fs.existsSync(path.dirname(LOG_FILE))) {
 app.get('/crash', (req, res) => {
     try {
         /**
-         * PLANNED BUG:
+         * 🚨 PLANNED BUG:
          * models/user.js mein 'fullName' hai, lekin hum 'name' access kar rahe hain.
          * User.name undefined hoga, aur undefined.toUpperCase() crash kar dega.
          */
         console.log("Attempting to access User.name...");
-        const user = new User(); // Assuming that User has a constructor
-        const welcomeMessage = `Welcome, ${user.name?.toUpperCase()}`; // using optional chaining
+        const welcomeMessage = `Welcome, ${User.name.toUpperCase()}`; 
         
         res.send(welcomeMessage); 
     } catch (error) {
@@ -37,7 +36,7 @@ app.get('/crash', (req, res) => {
         const errorData = `\n---\nFILE: ${__filename}\nERROR: ${error.message}\nSTACK: ${error.stack}\n---\n`;
         
         fs.appendFileSync(LOG_FILE, errorData);
-        console.log("✗️ App Crashed! Error logged for Sentinel.");
+        console.log("❌ App Crashed! Error logged for Sentinel.");
         
         res.status(500).send("Sentinel is on the case. Check your terminal!");
     }
@@ -45,20 +44,15 @@ app.get('/crash', (req, res) => {
 
 // --- 2. SLOW API (The Optimizer) ---
 app.get('/slow-api', (req, res) => {
+    // 1 second delay to trigger performance_logger
     setTimeout(() => {
-        res.send("Bhai, main bohot slow hoon!");
-        console.log("Slow API hit, waiting...");
-    }, 2000); // moved console.log inside the setTimeout callback
+        res.send("Bhai, main bohot slow hoon, Sentinel ko bulao!");
+    }, 1000); 
 });
 
 // --- SERVER START ---
 const PORT = 3000;
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
     console.log(`🚀 Patient App running on http://localhost:${PORT}`);
     console.log(`📂 Monitoring Log: ${LOG_FILE}`);
-});
-
-// add a shutdown hook to close the server cleanly
-process.on('exit', () => {
-    server.close();
 });
