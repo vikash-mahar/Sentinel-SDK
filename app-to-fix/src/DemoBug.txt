@@ -1,25 +1,55 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 
-// Models and Middleware
-const User = require('./models/user.js'); 
-const performanceLogger = require('./performance_logger');
+// Models and Middleware - Check if these paths exist!
+const USER_MODEL_PATH = './models/user.js';
+const PERFORMANCE_LOGGER_PATH = './performance_logger';
+
+let User;
+try {
+    User = require(USER_MODEL_PATH);
+} catch (e) {
+    console.error(`❌ Model Error: Could not find ${USER_MODEL_PATH}. Make sure the file exists.`);
+    process.exit(1);
+}
+
+let performanceLogger;
+try {
+    performanceLogger = require(PERFORMANCE_LOGGER_PATH);
+} catch (e) {
+    console.error(`❌ Middleware Error: Could not find ${PERFORMANCE_LOGGER_PATH}.`);
+    process.exit(1);
+}
 
 const app = express();
 
-// Performance Monitoring Middleware
+// Manual CORS Middleware
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+app.use(express.json());
 app.use(performanceLogger);
 
-// Logs Path (Absolute path is safer for Sentinel)
 const LOG_FILE = path.join(__dirname, 'logs', 'error.log');
 
-// Ensure logs directory exists at startup
 if (!fs.existsSync(path.dirname(LOG_FILE))) {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    try {
+        fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    } catch (e) {
+        console.error("❌ Log Directory Error:", e.message);
+    }
 }
 
-// --- 1. CRASH ROUTE (The Bug Hunter) ---
+// --- Routes ---
 app.get('/crash', (req, res) => {
     try {
         /**
@@ -42,7 +72,59 @@ app.get('/crash', (req, res) => {
     }
 });
 
-// --- 2. SLOW API (The Optimizer) ---
+app.post('/api/sentinel/scan', (req, res) => {
+    console.log("🔍 [Sentinel] Initiating Predictive Scan via LangGraph...");
+    
+    // Sentinel Agent folder path
+    const agentDir = path.join(__dirname, '../../sentinel_agent'); 
+    const targetFile = path.resolve(__dirname, '../app-to-fix/src/server.js');
+
+    /**
+     * UPDATED FIX: 
+     * Using a more direct execution method to avoid 'spawn /bin/sh ENOENT' on Mac.
+     * We pass the current process environment to ensure python3 is found in the PATH.
+     */
+    const pythonCmd = `python3 -c "from graph import run_predictive_scan; run_predictive_scan('${targetFile}')"`;
+
+    console.log(`🚀 Executing command in: ${agentDir}`);
+
+    // Mac/Linux systems often need the shell explicitly set or PATH inherited
+    const execOptions = {
+        cwd: agentDir,
+        env: { ...process.env, PATH: process.env.PATH },
+        maxBuffer: 1024 * 1024 * 10 // 10MB buffer for LLM output
+    };
+
+    exec(pythonCmd, execOptions, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`❌ Scan Error: ${error.message}`);
+            // If python3 is not found, try 'python' fallback
+            if (error.message.includes('not found') || error.message.includes('ENOENT')) {
+                console.log("🔄 python3 not found, attempting with 'python' command...");
+                const fallbackCmd = `python -c "from graph import run_predictive_scan; run_predictive_scan('${targetFile}')"`;
+                return exec(fallbackCmd, execOptions, (err2, out2, stderr2) => {
+                    if (err2) {
+                        return res.status(500).json({ error: "Python not found. Please check your PATH.", details: err2.message });
+                    }
+                    res.json({ message: "Scan completed (fallback)", output: out2.trim() });
+                });
+            }
+            return res.status(500).json({ 
+                error: "Scan failed", 
+                details: error.message,
+                stderr: stderr 
+            });
+        }
+        
+        if (stderr) {
+            console.warn(`⚠️ Scan Warning: ${stderr}`);
+        }
+
+        console.log(`✅ Scan Output: ${stdout}`);
+        res.json({ message: "Scan completed", output: stdout.trim() });
+    });
+});
+
 app.get('/slow-api', (req, res) => {
     // 1 second delay to trigger performance_logger
     setTimeout(() => {
@@ -50,9 +132,16 @@ app.get('/slow-api', (req, res) => {
     }, 1000); 
 });
 
-// --- SERVER START ---
+// --- Start Server ---
 const PORT = 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Patient App running on http://localhost:${PORT}`);
+const server = app.listen(PORT, () => {
+    console.log(`🚀 Sentinel Backend running on http://localhost:${PORT}`);
     console.log(`📂 Monitoring Log: ${LOG_FILE}`);
+}).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Error: Port ${PORT} is already in use!`);
+    } else {
+        console.error("❌ Server Error:", err);
+    }
+    process.exit(1);
 });

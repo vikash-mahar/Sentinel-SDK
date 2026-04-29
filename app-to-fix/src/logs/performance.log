@@ -1,2 +1,13 @@
 [PERF] 2026-04-29T17:21:50.593Z | GET /slow-api took 2017ms
 [PERF] 2026-04-29T18:06:16.732Z | GET /slow-api took 1077ms
+[PERF] 2026-04-29T19:38:54.383Z | POST /api/sentinel/scan took 11329ms
+[PERF] 2026-04-29T20:26:09.081Z | GET /slow-api took 1036ms
+[PERF] 2026-04-29T20:47:09.554Z | POST /api/sentinel/scan took 4515ms
+[PERF] 2026-04-29T20:47:29.364Z | POST /api/sentinel/scan took 3556ms
+[PERF] 2026-04-29T20:47:38.653Z | POST /api/sentinel/scan took 3986ms
+[PERF] 2026-04-29T20:49:16.035Z | POST /api/sentinel/scan took 6449ms
+[PERF] 2026-04-29T20:54:21.193Z | POST /api/sentinel/scan took 8295ms
+[PERF] 2026-04-29T20:55:21.182Z | POST /api/sentinel/scan took 4028ms
+[PERF] 2026-04-29T20:58:19.793Z | POST /api/sentinel/scan took 5060ms
+[PERF] 2026-04-29T20:58:58.730Z | POST /api/sentinel/scan took 6172ms
+[PERF] 2026-04-29T21:02:41.902Z | POST /api/sentinel/scan took 14122ms

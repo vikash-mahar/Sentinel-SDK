@@ -11,3 +11,4 @@ __pycache__/
 .DS_Storesentinel_agent/.venv/
 __pycache__/
 .DS_Store
+node_modules

@@ -305,3 +305,50 @@ def repair_code(error_log, file_path):
 
 def optimize_code(perf_log, file_path):
     return run_sentinel_agents("PERFORMANCE", file_path, perf_log)
+
+def run_predictive_scan(file_path):
+    """SABSE IMPORTANT: Yeh code ko crash hone se pehle analyze karta hai"""
+    print(f"\n🔍 [Agent: Scanner] Performing Pre-Emptive scan on {file_path}...")
+    
+    if not os.path.exists(file_path):
+        print("❌ File not found for scanning.")
+        return False
+
+    with open(file_path, "r") as f:
+        code = f.read()
+
+    # Special Prompt for Vulnerability Prediction
+    prompt = f"""
+    You are a Senior Security & Stability Auditor. 
+    Analyze the following Node.js code and predict potential runtime errors (null pointers, undefined variables, unhandled exceptions).
+
+    CODE:
+    {code}
+
+    RESPONSE RULE:
+    Return ONLY a JSON object with a key "vulnerabilities" containing an array of issues.
+    Each issue must have: "priority" (HIGH/MEDIUM/LOW), "line" (number), "issue" (description), and "fix" (suggestion).
+    No markdown, no talk.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={ "type": "json_object" } # Strict JSON format
+        ).choices[0].message.content
+
+        # Parse logic
+        data = json.loads(response)
+        issues = data.get("vulnerabilities", [])
+
+        # Dashboard ke liye file save karna
+        scan_results_path = os.path.abspath("../sentinel-dashboard/public/scan_results.json")
+        with open(scan_results_path, "w") as f:
+            json.dump(issues, f, indent=4)
+        
+        print(f"✅ Scan Complete: {len(issues)} potential issues detected.")
+        return True
+    except Exception as e:
+        print(f"⚠️ Scan Agent Error: {e}")
+        return False
