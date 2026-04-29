@@ -1,63 +1,79 @@
 import subprocess
 import os
+import json
+import chromadb
 from groq import Groq
 from dotenv import load_dotenv
-import json
 from datetime import datetime
-from prompts import SYSTEM_PROMPT, LOGIC_VERIFICATION_PROMPT
-import chromadb
+from typing import TypedDict, List, Optional
+from langgraph.graph import StateGraph, END
+
+# Prompts file se system instruction load karna
+from prompts import SYSTEM_PROMPT 
 
 load_dotenv()
 
-# --- ChromaDB Setup Fix ---
+# --- 1. CONFIGURATION & CLIENTS ---
+# Groq Client initialize karna
+client = Groq()
+
+# ChromaDB Persistent Client (Memory/RAG ke liye)
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
-collection = None  # Global declaration taaki retrieval fail na ho
+collection = None
 
 try:
+    # Codebase memory collection fetch karna
     collection = chroma_client.get_collection(name="codebase")
 except Exception as e:
     print(f"⚠️ Warning: Collection 'codebase' not found. Run indexer.py first! Error: {e}")
 
-client = Groq() 
+# --- 2. STATE DEFINITION (Common Memory for Agents) ---
+class SentinelState(TypedDict):
+    issue_type: str         # "CRASH" or "PERFORMANCE"
+    file_path: str          # Jis file mein bug hai
+    error_log: str          # Error details ya slowness details
+    original_code: str      # Purana code
+    proposed_fix: str       # Architect ka naya code
+    feedback: str           # Reviewer ka feedback (retries ke liye)
+    attempts: int           # Kitni baar try kiya
+    audit_passed: bool      # Reviewer ne pass kiya ya nahi
+    explanation: str        # AI ka explanation
 
-# --- HELPER FUNCTIONS ---
+# --- 3. HELPER UTILITIES ---
 
-def get_related_context(error_log):
-    """Fetches relevant code snippets from ChromaDB memory based on the error."""
+def get_related_context(query_text):
+    """ChromaDB se milta-julta code dhoondna (RAG context)"""
+    if collection is None: 
+        return "No codebase memory available."
     try:
         print("🧠 Sentinel is searching codebase memory for context...")
-        results = collection.query(
-            query_texts=[error_log],
-            n_results=2 # Gets top 2 most related files
-        )
-        
+        results = collection.query(query_texts=[query_text], n_results=2)
         context_str = ""
         for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-            context_str += f"\n--- POTENTIAL RELATED FILE: {meta['path']} ---\n{doc}\n"
+            context_str += f"\n--- RELATED FILE: {meta['path']} ---\n{doc}\n"
         return context_str
     except Exception as e:
         print(f"⚠️ Context Retrieval Failed: {e}")
-        return "No additional context found."
+        return "Context retrieval failed."
 
-def log_mentor_message(message):
-    mentor_file = "../sentinel-dashboard/public/sentinel_mentor.txt"
-    timestamp = datetime.now().strftime("%H:%M:%S")
+def validate_syntax(file_path):
+    """Node.js check command se syntax verify karna"""
     try:
-        with open(mentor_file, "a") as f:
-            f.write(f"[{timestamp}] 🤖 Sentinel: {message}\n")
-        print(f"📩 New mentor message saved.")
-    except Exception as e:
-        print(f"⚠️ Could not save mentor message: {e}")
+        result = subprocess.run(["node", "--check", file_path], capture_output=True, text=True)
+        return result.returncode == 0, result.stderr
+    except Exception as e: 
+        return False, str(e)
 
-def log_fix_to_history(file_path, error_log, original_code, corrected_code, mode="Auto-Patched"):
+def log_fix_to_history(file_path, issue, original_code, corrected_code, mode):
+    """Dashboard ke liye JSON history update karna"""
     history_file = "../sentinel-dashboard/public/fixes_history.json"
     new_record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "file_fixed": file_path,
-        "error_detected": error_log[:200] + "...",
-        "status": mode, # Ab ye 'Auto-Patched' ya 'Self-Optimized' dikhayega
-        "error_code": original_code, 
-        "corrected_code": corrected_code 
+        "issue": issue[:200],
+        "status": mode,
+        "previous_code": original_code,
+        "fixed_code": corrected_code
     }
     history_data = []
     if os.path.exists(history_file):
@@ -71,219 +87,221 @@ def log_fix_to_history(file_path, error_log, original_code, corrected_code, mode
         json.dump(history_data, f, indent=4)
     print(f"📄 Record saved to fixes_history.json as {mode}")
 
-def validate_code(file_path):
+def log_mentor_message(message):
+    """Dashboard mentor message update karna"""
+    mentor_file = "../sentinel-dashboard/public/sentinel_mentor.txt"
+    timestamp = datetime.now().strftime("%H:%M:%S")
     try:
-        result = subprocess.run(
-            ["node", "--check", file_path],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            return True, "Success"
-        else:
-            return False, result.stderr
-    except Exception as e: 
-        return False, str(e)
+        with open(mentor_file, "a") as f:
+            f.write(f"[{timestamp}] 🤖 Sentinel: {message}\n")
+    except Exception as e:
+        print(f"⚠️ Mentor log failed: {e}")
 
-def optimize_code(perf_log, file_path):
-    """Handles Performance Refactoring with strict extraction."""
-    print(f"⚡ Sentinel Optimization Mode: {file_path}")
+# --- 4. AGENT NODES (Role-Based Logic) ---
+
+def scout_node(state: SentinelState):
+    """Agent A (Scout): Context aur original code gather karta hai"""
+    print(f"\n🔭 [Agent: Scout] Analyzing {state['issue_type']} in {state['file_path']}...")
     
-    if not os.path.exists(file_path):
-        print(f"❌ Error: File not found at {file_path}")
-        return False
+    if not os.path.exists(state['file_path']):
+        return {"feedback": "File not found", "audit_passed": False}
+        
+    with open(state['file_path'], "r") as f:
+        code = f.read()
+    
+    # RAG Se context nikalna
+    context = get_related_context(state['error_log'])
+    
+    return {
+        "original_code": code,
+        "feedback": f"Codebase Context retrieved:\n{context}",
+        "attempts": 0
+    }
 
-    with open(file_path, "r") as f:
-        original_code = f.read()
-
-    context = get_related_context(perf_log)
-
+def architect_node(state: SentinelState):
+    """Agent B (Architect): Fix ya Optimization code generate karta hai"""
+    print(f"🏗️  [Agent: Architect] Generating solution (Attempt {state['attempts'] + 1})...")
+    
+    # Dynamic prompt creation
+    prompt_type = "Bug Fix" if state['issue_type'] == "CRASH" else "Performance Optimization"
+    
     prompt = f"""
-    You are a Senior Performance Engineer. 
-    ISSUE: {perf_log}
-    TARGET FILE: {file_path}
-    CODE:
-    {original_code}
+    {SYSTEM_PROMPT}
+    MODE: {prompt_type}
+    ISSUE/LOGS: {state['error_log']}
+    FILE PATH: {state['file_path']}
+    CURRENT CODE:
+    {state['original_code']}
 
-    CONTEXT FROM OTHER FILES:
-    {context}
+    ADDITIONAL CONTEXT:
+    {state['feedback']}
+    
+    TASK: Provide a complete and working version of the file.
+    - If it's a crash, handle the error safely.
+    - If it's performance, optimize loops/queries.
+    - KEEP original logic intact.
 
-    TASK:
-    Optimize the TARGET FILE for better performance. 
-    - Reduce time complexity.
-    - Use efficient built-in methods.
-    - KEEP THE ORIGINAL LOGIC UNCHANGED.
-
-    CRITICAL INSTRUCTION:
-    Return ONLY the code inside [FIXED_CODE] and [/FIXED_CODE] tags. 
-    Do NOT include any markdown (```), explanations, or '###' headers inside the tags.
+    CRITICAL: 
+    - Return ONLY the code inside [FIXED_CODE] and [/FIXED_CODE] tags.
+    - Provide a short explanation inside [EXPLANATION] and [/EXPLANATION] tags.
     """
+    
+    if state['attempts'] > 0:
+        prompt += f"\n\n🚨 PREVIOUS ATTEMPT FAILED. FEEDBACK: {state['feedback']}"
 
     try:
         response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant"
-        ).choices[0].message.content
-
-        # --- SMART EXTRACTION LOGIC ---
-        optimized_code = response
-        if "[FIXED_CODE]" in response:
-            optimized_code = response.split("[FIXED_CODE]")[1].split("[/FIXED_CODE]")[0].strip()
-        
-        # Remove any lingering Markdown backticks or language tags
-        if "```" in optimized_code:
-            lines = optimized_code.split("\n")
-            # Filter out lines starting with ```
-            optimized_code = "\n".join([line for line in lines if not line.strip().startswith("```")])
-
-        optimized_code = optimized_code.strip()
-
-        # Validation Step
-        temp_file = file_path.replace(".js", ".opt.js")
-        with open(temp_file, "w") as f:
-            f.write(optimized_code)
-        
-        success, err = validate_code(temp_file)
-        if success:
-            os.replace(temp_file, file_path)
-            print("🚀 Optimization Deployed Successfully!")
-            log_fix_to_history(file_path, perf_log, original_code, optimized_code, mode="Self-Optimized")
-            return True
-        else:
-            print(f"❌ Optimization Failed Validation. AI output was invalid JS.")
-            print(f"Debug Info: {err}")
-            if os.path.exists(temp_file): os.remove(temp_file)
-            return False
-            
-    except Exception as e:
-        print(f"⚠️ Optimization Error: {e}")
-        return False
-
-def code_verification(original_code, fixed_code, error_log, file_path):
-    print("🧠 Sentinel is auditing the fix logic via Semantic Analysis...")
-    prompt = f"""
-    You are a Senior Code Auditor. 
-    ERROR DETECTED: {error_log}
-    ORIGINAL CODE: {original_code}
-    FIXED CODE: {fixed_code}
-
-    TASK:
-    Verify if the FIXED CODE safely handles the error (e.g., using optional chaining ?., 
-    null-checks, or default objects) WITHOUT breaking the original functionality.
-
-    RESPONSE RULE:
-    - If the fix is correct, reply with ONLY the word 'PASSED'.
-    - If the fix is incorrect or incomplete, provide a 1-sentence explanation of the flaw.
-    """
-    try:
-        response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant"
-        ).choices[0].message.content
-
-        if "PASSED" in response.upper():
-            print("✅ Logic Audit PASSED.")
-            return True, "Logic check passed."
-        else:
-            print(f"❌ Logic Audit REJECTED: {response}")
-            return False, response
-    except Exception as e:
-        print(f"⚠️ Audit Fallback: {e}")
-        return True, "API Fallback"
-
-def repair_code(error_log, file_path):
-    # Tera existing repair_code yahan add kar le (Jo humne pehle fix kiya tha)
-    print(f"🛠️ Repair mode activated for {file_path}")
-    # ... logic ...
-    pass
-
-def repair_code(error_log, file_path):
-    print(f"🛠️ Repair mode activated for {file_path}")
-    print(f"🐞 DEBUG: Received Error Log -> {error_log}")
-    
-    with open(file_path, "r") as f:
-        original_code = f.read()
-
-    # RAG: Fetch related context before fixing
-    related_context = get_related_context(error_log)
-
-    attempts = 0
-    max_attempts = 3
-    feedback_for_ai = ""
-    
-    while attempts < max_attempts:
-        print(f"🤖 AI Attempt {attempts + 1}: Fixing {file_path}...")
-        
-        # Enhanced Prompt with RAG Context
-        prompt = f"""
-        {SYSTEM_PROMPT}
-        
-        ERROR LOG:
-        {error_log}
-        
-        BUGGY FILE ({file_path}):
-        {original_code}
-        
-        RELATED CODEBASE CONTEXT:
-        {related_context}
-        
-        INSTRUCTION: Use the RELATED CODEBASE CONTEXT to understand how other files 
-        interact with this buggy file. Provide the fixed code.
-        """
-        
-        if attempts > 0:
-            prompt += f"\n\nCRITICAL: PREVIOUS FIX FAILED. FEEDBACK: {feedback_for_ai}"
-
-        full_response = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant"
         ).choices[0].message.content
 
         # Extraction Logic
         try:
-            explanation = "Automated fix applied."
-            if "[EXPLANATION]" in full_response:
-                parts = full_response.split("[EXPLANATION]")
-                explanation = parts[1].strip()
-                code_section = parts[0]
-            else:
-                code_section = full_response
-
-            if "[FIXED_CODE]" in code_section:
-                corrected_code = code_section.split("[FIXED_CODE]")[1].strip()
-            else:
-                corrected_code = code_section.strip()
-
-            if "```" in corrected_code:
-                corrected_code = corrected_code.split("```")[1]
-                if corrected_code.startswith("javascript") or corrected_code.startswith("js"):
-                    corrected_code = corrected_code.replace("javascript", "", 1).replace("js", "", 1)
+            fix = response.split("[FIXED_CODE]")[1].split("[/FIXED_CODE]")[0].strip()
+            # Clean Markdown if AI included it
+            if "```" in fix:
+                fix = fix.split("```")[1].replace("javascript", "").replace("js", "").strip()
             
-            corrected_code = corrected_code.strip()
+            explanation = response.split("[EXPLANATION]")[1].split("[/EXPLANATION]")[0].strip()
         except:
-            corrected_code = full_response
-            explanation = "Code patched by Sentinel."
+            fix = response.strip()
+            explanation = "Automated patch applied."
 
-        temp_file = file_path.replace(".js", f".tmp_{attempts}.js") 
-        with open(temp_file, "w") as f:
-            f.write(corrected_code)
+        return {
+            "proposed_fix": fix, 
+            "explanation": explanation, 
+            "attempts": state['attempts'] + 1
+        }
+    except Exception as e:
+        return {"feedback": f"LLM Error: {str(e)}", "attempts": state['attempts'] + 1}
 
-        if validate_code(temp_file)[0]:
-            logic_passed, audit_feedback = code_verification(original_code, corrected_code, error_log, file_path)
-            if logic_passed:
-                os.replace(temp_file, file_path)
-                print("🚀 SUCCESS: Patch deployed with context awareness!")
-                log_fix_to_history(file_path, error_log, original_code, corrected_code)
-                log_mentor_message(explanation)
-                return True
-            else:
-                feedback_for_ai = f"LOGIC REJECTION: {audit_feedback}"
+def reviewer_node(state: SentinelState):
+    """Agent C (Reviewer): Code ki syntax aur logic audit karta hai"""
+    print("🛡️  [Agent: Reviewer] Auditing the proposed fix...")
+    
+    proposed = state.get('proposed_fix', "")
+    if not proposed:
+        return {"audit_passed": False, "feedback": "No code proposed by Architect."}
+
+    # 1. Syntax Validation
+    temp_file = state['file_path'].replace(".js", ".tmp_audit.js")
+    with open(temp_file, "w") as f:
+        f.write(proposed)
+    
+    is_valid, err_msg = validate_syntax(temp_file)
+    os.remove(temp_file) # Cleanup
+
+    if not is_valid:
+        print(f"❌ Reviewer rejected: Syntax Error detected.")
+        return {"audit_passed": False, "feedback": f"Syntax Error: {err_msg}"}
+
+    # 2. Semantic Logic Audit (LLM Check)
+    print("🧠 Reviewer is performing semantic logic check...")
+    audit_prompt = f"""
+    You are a Senior Security & Logic Auditor.
+    Original Code: {state['original_code']}
+    Proposed Fix: {proposed}
+    Error/Issue: {state['error_log']}
+
+    Does the proposed fix safely solve the issue without breaking other features?
+    If yes, reply with 'PASSED'.
+    If no, provide a 1-sentence feedback.
+    """
+    
+    try:
+        audit_res = client.chat.completions.create(
+            messages=[{"role": "user", "content": audit_prompt}],
+            model="llama-3.1-8b-instant"
+        ).choices[0].message.content
+
+        if "PASSED" in audit_res.upper():
+            print("✅ Reviewer Audit: PASSED")
+            return {"audit_passed": True, "feedback": "Logic verified and passed."}
         else:
-            feedback_for_ai = "SYNTAX ERROR detected in the fix."
+            print(f"❌ Reviewer Audit: REJECTED - {audit_res}")
+            return {"audit_passed": False, "feedback": audit_res}
+    except:
+        # Fallback to syntax only if LLM audit fails
+        return {"audit_passed": True, "feedback": "Syntax pass (Audit fallback)."}
+
+# --- 5. GRAPH CONSTRUCTION ---
+
+workflow = StateGraph(SentinelState)
+
+# Define Nodes
+workflow.add_node("scout", scout_node)
+workflow.add_node("architect", architect_node)
+workflow.add_node("reviewer", reviewer_node)
+
+# Define Flow/Edges
+workflow.set_entry_point("scout")
+workflow.add_edge("scout", "architect")
+workflow.add_edge("architect", "reviewer")
+
+# Router logic: Reviewer decide karega aage kahan jana hai
+def router_logic(state: SentinelState):
+    if state['audit_passed']:
+        return "deploy"
+    elif state['attempts'] >= 3:
+        return "abort"
+    else:
+        return "retry"
+
+workflow.add_conditional_edges(
+    "reviewer",
+    router_logic,
+    {
+        "deploy": END,
+        "retry": "architect",
+        "abort": END
+    }
+)
+
+# Graph compile karna
+sentinel_agents = workflow.compile()
+
+# --- 6. EXPORTED WRAPPER (For main.py) ---
+
+def run_sentinel_agents(issue_type, file_path, log_content):
+    """
+    Main entry point for main.py to trigger the multi-agent workflow.
+    """
+    initial_state = {
+        "issue_type": issue_type,
+        "file_path": os.path.abspath(file_path),
+        "error_log": log_content,
+        "attempts": 0,
+        "audit_passed": False,
+        "proposed_fix": ""
+    }
+    
+    print(f"\n🚀 [Sentinel Core] Dispatching Agents for {issue_type}...")
+    final_state = sentinel_agents.invoke(initial_state)
+    
+    if final_state.get("audit_passed"):
+        # Save fixed code to file
+        with open(file_path, "w") as f:
+            f.write(final_state["proposed_fix"])
         
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-        attempts += 1
-            
-    print("🛑 Max attempts reached. Manual intervention needed.")
-    return False
+        # History aur Dashboard update
+        mode = "Self-Optimized" if issue_type == "PERFORMANCE" else "Auto-Patched"
+        log_fix_to_history(
+            file_path, 
+            log_content, 
+            final_state["original_code"], 
+            final_state["proposed_fix"], 
+            mode
+        )
+        log_mentor_message(final_state.get("explanation", "Issue resolved by agents."))
+        print(f"🚀 [Sentinel Core] SUCCESS: {mode} deployed to {file_path}")
+        return True
+    else:
+        print(f"❌ [Sentinel Core] ABORTED: Agents could not fix the issue safely.")
+        return False
+
+# Legacy support for main.py calls
+def repair_code(error_log, file_path):
+    return run_sentinel_agents("CRASH", file_path, error_log)
+
+def optimize_code(perf_log, file_path):
+    return run_sentinel_agents("PERFORMANCE", file_path, perf_log)

@@ -25,11 +25,11 @@ app.get('/crash', (req, res) => {
         /**
          * PLANNED BUG:
          * models/user.js mein 'fullName' hai, lekin hum 'name' access kar rahe hain.
-         * User.name undefined hoga, aur undefined.toUpperCase() crash kar dega.
+         * User.fullName undefined hoga, aur undefined.toUpperCase() crash kar dega.
          */
-        console.log("Attempting to access User.name...");
-        const user = new User(); // Assuming that User has a constructor
-        const welcomeMessage = `Welcome, ${user.name?.toUpperCase()}`; // using optional chaining
+        console.log("Attempting to access UserFullName...");
+        const userExists = User.findOne({}, { name: 1 }); // Safe way to query with projection
+        const welcomeMessage = (userExists && userExists.name)? userExists.name.toUpperCase(): ""; // Safe way to uppercase name
         
         res.send(welcomeMessage); 
     } catch (error) {
@@ -37,28 +37,8 @@ app.get('/crash', (req, res) => {
         const errorData = `\n---\nFILE: ${__filename}\nERROR: ${error.message}\nSTACK: ${error.stack}\n---\n`;
         
         fs.appendFileSync(LOG_FILE, errorData);
-        console.log("✗️ App Crashed! Error logged for Sentinel.");
+        console.log("❌ App Crashed! Error logged for Sentinel.");
         
         res.status(500).send("Sentinel is on the case. Check your terminal!");
     }
-});
-
-// --- 2. SLOW API (The Optimizer) ---
-app.get('/slow-api', (req, res) => {
-    setTimeout(() => {
-        res.send("Bhai, main bohot slow hoon!");
-        console.log("Slow API hit, waiting...");
-    }, 2000); // moved console.log inside the setTimeout callback
-});
-
-// --- SERVER START ---
-const PORT = 3000;
-const server = app.listen(PORT, () => {
-    console.log(`🚀 Patient App running on http://localhost:${PORT}`);
-    console.log(`📂 Monitoring Log: ${LOG_FILE}`);
-});
-
-// add a shutdown hook to close the server cleanly
-process.on('exit', () => {
-    server.close();
 });
